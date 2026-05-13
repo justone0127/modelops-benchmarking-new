@@ -1,0 +1,261 @@
+apiVersion: tekton.dev/v1
+kind: Task
+metadata:
+  name: model-registry
+  namespace: vllm
+
+spec:
+  params:
+    - name: model-url
+      type: string
+
+    - name: model-name
+      type: string
+
+    - name: model-reg-author
+      type: string
+
+  workspaces:
+    - name: shared-workspace
+      description: Shared workspace for storing benchmark results
+
+  steps:
+    - name: register-model
+
+      image: registry.access.redhat.com/ubi9/python-311
+
+      workingDir: $(workspaces.shared-workspace.path)
+
+      script: |
+        #!/usr/bin/env python3
+
+        import os
+        import sys
+        import glob
+        import subprocess
+
+        print("========================================")
+        print("Installing model-registry package")
+        print("========================================")
+
+        subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "pip",
+                "install",
+                "model-registry"
+            ],
+            check=True
+        )
+
+        from model_registry import ModelRegistry
+
+        workspace_path = "$(workspaces.shared-workspace.path)"
+
+        route_path = os.path.join(
+            workspace_path,
+            "model-reg-route.txt"
+        )
+
+        benchmarkui_route = os.path.join(
+            workspace_path,
+            "benchmarkui-route.txt"
+        )
+
+        s3_route = os.path.join(
+            workspace_path,
+            "s3ui-route.txt"
+        )
+
+        custom_data = os.path.join(
+            workspace_path,
+            "custom-data.txt"
+        )
+
+        benchmark_timestamp = os.path.join(
+            workspace_path,
+            "timestamp.txt"
+        )
+
+        print("")
+        print("========================================")
+        print("Workspace contents")
+        print("========================================")
+
+        for root, dirs, files in os.walk(workspace_path):
+
+            print(f"DIR: {root}")
+
+            for f in files:
+                print(f"  FILE: {f}")
+
+        print("")
+        print("========================================")
+        print("Searching benchmark result yaml")
+        print("========================================")
+
+        result_files = glob.glob(
+            os.path.join(
+                workspace_path,
+                "*results.yaml"
+            )
+        )
+
+        if not result_files:
+
+            print(
+                "Error: No benchmark result yaml found.",
+                file=sys.stderr
+            )
+
+            sys.exit(1)
+
+        lmeval_results_path = result_files[0]
+
+        print(f"Using result file: {lmeval_results_path}")
+
+        print("")
+        print("========================================")
+        print("Reading route information")
+        print("========================================")
+
+        try:
+
+            with open(route_path, 'r') as f:
+                route = f.read().strip()
+
+            if not route:
+
+                print(
+                    "Error: Route file is empty.",
+                    file=sys.stderr
+                )
+
+                sys.exit(1)
+
+            route = f"https://{route}"
+
+            print(f"Model registry route: {route}")
+
+            with open(benchmarkui_route, 'r') as f:
+                benchmarkui_route_val = f.read().strip()
+
+            with open(s3_route, 'r') as f:
+                s3_route_val = f.read().strip()
+
+            with open(custom_data, 'r') as f:
+                custom_data_val = f.read().strip()
+
+            with open(benchmark_timestamp, 'r') as f:
+                benchmark_timestamp_value = f.read().strip()
+
+        except Exception as e:
+
+            print(
+                f"Failed reading workspace files: {e}",
+                file=sys.stderr
+            )
+
+            sys.exit(1)
+
+        print("")
+        print("========================================")
+        print("Reading benchmark results")
+        print("========================================")
+
+        try:
+
+            with open(lmeval_results_path, 'r') as f:
+                lmeval_results = f.read()
+
+            print("Successfully loaded benchmark results.")
+
+        except Exception as e:
+
+            print(
+                f"Failed reading benchmark yaml: {e}",
+                file=sys.stderr
+            )
+
+            sys.exit(1)
+
+        print("")
+        print("========================================")
+        print("Connecting to Model Registry")
+        print("========================================")
+
+        try:
+
+            registry = ModelRegistry(
+                server_address=route,
+                author="$(params.model-reg-author)",
+                is_secure=False
+            )
+
+            print("Connected to model registry.")
+
+        except Exception as e:
+
+            print(
+                f"Failed to connect model registry: {e}",
+                file=sys.stderr
+            )
+
+            sys.exit(1)
+
+        print("")
+        print("========================================")
+        print("Registering model")
+        print("========================================")
+
+        try:
+
+            registered_model = registry.register_model(
+
+                name="$(params.model-name)",
+
+                uri="https://$(params.model-url)",
+
+                version="1",
+
+                model_format_name="onnx",
+
+                model_format_version="1",
+
+                description="Model registered from Tekton pipeline",
+
+                metadata={
+
+                    "🔵 Quay Repo URL":
+                        f"https://$(params.model-url)",
+
+                    "🔵 GuideLLM Results UI":
+                        f"https://{benchmarkui_route_val}/?file={os.path.basename(lmeval_results_path)}",
+
+                    "🔵 GuideLLM Results S3":
+                        f"{s3_route_val}/download/benchmark-results/{os.path.basename(lmeval_results_path)}",
+
+                    "🔵 Benchmark Timestamp":
+                        benchmark_timestamp_value,
+
+                    "🔵 Custom Benchmark":
+                        custom_data_val
+                }
+            )
+
+            print("")
+            print("========================================")
+            print("Model registration completed")
+            print("========================================")
+
+            print(f"Registered model: {registered_model.name}")
+
+        except Exception as e:
+
+            print(
+                f"Failed model registration: {e}",
+                file=sys.stderr
+            )
+
+            sys.exit(1)
